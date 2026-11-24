@@ -47,9 +47,10 @@ RPS_BEATS= {"rock":"scissors","paper":"rock","scissors":"paper"}
 
 @cmd("rps")
 def rps(uid,args):
-    if args and args(0).startswith("<"):
+    if args and args[0].startswith("<"):
         return _make_challenge(uid,args,"rps")
-    bet,err=universalhelper(uid,args,"rps")
+    cash, _ = db_module.get_user(uid)
+    bet,err=universalhelper(args[0] if args else "", cash)
     if err:
         return add_usage_hint(err, "\nHow to use gng: `/rps <bet|half|all>` (vs bot) or `/rps @user [bet]` (vs person)")
     db_module.change_money(uid,cash=-bet)
@@ -61,4 +62,36 @@ def rps(uid,args):
         f"✊ *Rock Paper Scissors* · {ui.tag(uid)} bet {ui.fmt(bet)}\nPick your move!",
         ui.BLUE, nolog=True, buttons=buttons + [ui.HELP_BUTTON],
     )
-#Finish second part of rps
+#Finish second part of rps,back(will be adding less comments to avoid fraud)
+def register_rps_action(slack_app):
+    @slack_app.action(re.compile(r"^rps_(rock|paper|scissors)$"))
+    def rps_action(ack,body,respond,action):
+        ack()
+        with db_module.lock:
+            game = _rps_games.get(action["value"])
+            if not game:
+                ui.only_you(respond,"That game ended bro.")
+                return
+            if body["user"]["id"] != game["uid"]:
+                ui.only_you(respond,"This aint your game😭")
+                return
+            player_move = action["action_id"][4:]
+            bot_move=random.choice(list(RPS_CHOICES))
+            uid, bet = game["uid"], game["bet"]
+            if player_move==bot_move:
+                profit,result,color= 0, "Tie,the money is returned",ui.GREY
+            elif RPS_BEATS[player_move]==bot_move:
+                profit,result,color=scaled_win(uid,bet,2),"You win.",ui.GREEN
+            else:
+                profit,result,color= -bet,"You lose haaha.",ui.RED
+            if bet + profit:
+                db_module.change_money(uid,cash=bet +profit)
+            _rps_games.pop(action["value"], None)
+            ui.swap(respond,ui.embed(
+                f"*Rock Paper Scissors* · {ui.tag(uid)} bet {ui.fmt(bet)}\n"
+                f"You: {RPS_CHOICES[player_move]} {player_move}  vs  Bot: {RPS_CHOICES[bot_move]} {bot_move}\n"
+                f"*{result}*  *{ui.signed(profit)}*",
+                color, nolog=True, buttons=[ui.HELP_BUTTON],
+            ), db_module.db, db_module.lock)
+
+#Time to do roulette
