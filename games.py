@@ -3,9 +3,29 @@
 import random
 import database as db_module
 import ui
-from commands import cmd, parse_amount
+from commands import cmd, parse_amount, add_usage_hint, scaled_win, GAME_TIMEOUT
 import re
 import uuid
+import threading
+
+SUITS = "♠♥♦♣"
+
+def card_str(c):
+    face = {1: "A", 11: "J", 12: "Q", 13: "K"}.get(c[0], str(c[0]))
+    return f"`{face}{c[1]}`"
+
+def hand_str(hand):
+    return " ".join(card_str(c) for c in hand)
+
+def schedule_refund(store, game_id):
+    def refund():
+        with db_module.lock:
+            game = store.pop(game_id, None)
+            if game:
+                db_module.change_money(game["uid"], cash=game["bet"])
+    t = threading.Timer(GAME_TIMEOUT, refund)
+    t.daemon = True
+    t.start()
 
 def universalhelper(bet_text,maximum):
     if not bet_text:
@@ -325,9 +345,10 @@ def build_bj_screen(game,finished=False):
             color=ui.GREY
         else:
             color=ui.RED
-        header = f" *Blackjack* · {ui.tag(uid)} · bet {ui.fmt(bet)}\n*Result:* {result_label}  *{ui.signed(profit)}*"
+        header = f"🃏 *Blackjack* · {ui.tag(uid)} · bet {ui.fmt(bet)}\n*Result:* {result_label}  *{ui.signed(profit)}*"
         dealer_text = f"{hand_str(dealer_hand)}\nValue: {hand_value(dealer_hand)}"
         play_again_btn = ui.button("▶️ Play Again", "bj_again", f"{uid}:{game['bet0']}", "primary")
+        buttons = [play_again_btn, ui.HELP_BUTTON]
     else:
         color=ui.BLUE
         header = f"🃏 *Blackjack* · {ui.tag(uid)} · bet {ui.fmt(bet)}"
@@ -352,7 +373,7 @@ def build_bj_screen(game,finished=False):
             f"*Dealer Hand*\n{dealer_text}",
         ],
     )
-def finish_bg_game(game,natural=False):
+def finish_bj_game(game,natural=False):
     player_val = hand_value(game["player"])
     #Ima start commeting more lemme make sure the dealer keeps hitting until he reaches 17
     while hand_value(game["dealer"]) <17 and player_val <= 21:
@@ -399,7 +420,7 @@ def start_bj_game(uid,bet_text):
     bet,err=universalhelper(bet_text,cash)
     if err:
         return add_usage_hint(err, "\nUsage: `/blackjack <bet|half|all>`")
-    db_module.change_money(uid,cash=bet)
+    db_module.change_money(uid,cash=-bet)
     deck=new_deck()
     game_id=uuid.uuid4().hex[:8]
 
@@ -413,3 +434,51 @@ def start_bj_game(uid,bet_text):
         "dealer": [deck.pop(), deck.pop()],
     }
     bj_games[game_id]=game
+
+    timer=threading.Timer(GAME_TIMEOUT,lambda:bj_timeout(game_id))
+    timer.daemon=True
+    timer.start()
+
+    if hand_value(game["player"]) == 21:
+        finish_bj_game(game,natural=True)
+        return build_bj_screen(game,finished=True)
+
+    return build_bj_screen(game)
+
+@cmd("blackjack")
+def blackjack(uid,args):
+    if args and args[0].startswith("<"):
+        return _make_challenge(uid,args,"bj")
+    bet_text=args[0] if args else ""
+    return start_bj_game(uid,bet_text)
+def register_bj_actions(slack_app):
+    @slack_app.action(re.compile(r"^bj_(hit|stand|double)$"))
+    def bj_action(ack,body,respond,action):
+        ack()
+        with db_module.lock:
+            game_id=action["value"]
+            game=bj_games.get(game_id)
+            if not game:
+                ui.only_you(respond,"The game ended bro.")
+                return
+            if body["user"]["id"] != game["uid"]:
+                ui.only_you(respond,"This aint your game")
+                return
+            btn_clicked=action["action_id"]
+
+            if btn_clicked=="bj_hit":
+                game["player"].append(game["deck"].pop())
+                if hand_value(game["player"]) < 21:
+                    ui.swap(respond,build_bj_screen(game),db_module.db,db_module.lock)
+                    return
+            elif btn_clicked=="bj_double":
+                cash, _ = db_module.get_user(game["uid"])
+                if len(game["player"]) != 2 or cash < game["bet"]:
+                    ui.only_you(respond,"You cant double down now.")
+                    return
+                db_module.change_money(game["uid"], cash=-game["bet"])
+                game["bet"] *= 2
+                game["player"].append(game["deck"].pop())
+
+            finish_bj_game(game)
+            ui.swap(respond, build_bj_screen(game, finished=True), db_module.db, db_module.lock)
