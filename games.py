@@ -242,3 +242,174 @@ def register_hl_action(slack_app):
                 db_module.db,
                 db_module.lock,
             )
+
+#Les do slots(this sounds really bad but i dont support gambling)
+SLOT_SYMBOLS=["🍒", "🍒", "🍒", "🍋", "🍋", "🍇", "🔔", "💎", "7️⃣"]
+SLOT_PAYOUTS={
+    "7️⃣":10,
+    "💎":7,
+    "🔔":5,
+    "🍇":4,
+    "🍋":3,
+    "🍒":3,
+}
+@cmd("slots")
+def slots(uid,args):
+    cash,_=db_module.get_user(uid)
+    bet_text=args[0] if args else ""
+    bet,err=universalhelper(bet_text,cash)
+    if err:
+        return add_usage_hint(err, "\nUsage: `/slots <bet|half|all>`")
+    reel1=random.choice(SLOT_SYMBOLS)
+    reel2=random.choice(SLOT_SYMBOLS)
+    reel3=random.choice(SLOT_SYMBOLS)
+
+    if reel1 == reel2 == reel3:
+        mult=SLOT_PAYOUTS[reel1]
+        profit = scaled_win(uid, bet, mult - 1)
+        result_text = f"JACKPOTTTTT! Triple {reel1}!"
+        color=ui.GREEN
+    elif reel1 ==reel2 or reel2 ==reel3 or reel1 ==reel3:
+        profit= scaled_win(uid,bet,0.5)
+        result_text="Nice. Two matched"
+        color=ui.GREEN
+    else:
+        profit=-bet
+        result_text="No match,better luck next time bozo."
+        color=ui.RED
+    db_module.change_money(uid,cash=profit)
+    return ui.embed(
+            f"🎰 *Slots* · {ui.tag(uid)} · bet {ui.fmt(bet)}\n\n"
+            f"[ {reel1} | {reel2} | {reel3} ]\n\n"
+            f"*{result_text}*  *{ui.signed(profit)}*",
+            color,
+            nolog=True,
+            buttons=[ui.HELP_BUTTON],
+    )
+
+#Blackjack solo ima make 2 Player games later lowk
+def new_deck():
+    SUITS = ["♠", "♥", "♦", "♣"]
+    deck = []
+    for rank in range(1, 14):
+        for s in SUITS:
+            deck.append((rank, s))
+    random.shuffle(deck)
+    return deck
+def hand_value(hand):
+    total=0
+    has_ace=False
+    for card in hand:
+        rank=card[0]
+        if rank ==1:
+            has_ace=True
+            total +=1
+        elif rank >=10:
+            total += 10
+        else:
+            total +=rank
+    if has_ace and total + 10 <= 21:
+        total+=10
+    return total
+bj_games= {}
+def build_bj_screen(game,finished=False):
+    uid=game["uid"]
+    bet=game["bet"]
+    player_hand=game["player"]
+    dealer_hand=game["dealer"]
+    if finished:
+        result_label,profit=game["result"]
+        if profit >0:
+            color=ui.GREEN
+        elif profit == 0:
+            color=ui.GREY
+        else:
+            color=ui.RED
+        header = f" *Blackjack* · {ui.tag(uid)} · bet {ui.fmt(bet)}\n*Result:* {result_label}  *{ui.signed(profit)}*"
+        dealer_text = f"{hand_str(dealer_hand)}\nValue: {hand_value(dealer_hand)}"
+        play_again_btn = ui.button("▶️ Play Again", "bj_again", f"{uid}:{game['bet0']}", "primary")
+    else:
+        color=ui.BLUE
+        header = f"🃏 *Blackjack* · {ui.tag(uid)} · bet {ui.fmt(bet)}"
+        dealer_text = f"{card_str(dealer_hand[0])} `?`\nValue: ?"
+        buttons =[
+            ui.button("Hit", "bj_hit", game["gid"], "primary"),
+            ui.button("Stand", "bj_stand", game["gid"]),
+        ]
+        cash,_=db_module.get_user(uid)
+        if len(player_hand)== 2 and cash >= bet:
+            buttons.append(ui.button("Double Down", "bj_double", game["gid"]))
+        buttons.append(ui.HELP_BUTTON)
+
+    return ui.embed(
+        header,
+        color,
+        nolog=True,
+        buttons=buttons,
+        footer=f"Cards remaining: {len(game['deck'])}",
+        fields=[
+            f"*Your Hand*\n{hand_str(player_hand)}\nValue: {hand_value(player_hand)}",
+            f"*Dealer Hand*\n{dealer_text}",
+        ],
+    )
+def finish_bg_game(game,natural=False):
+    player_val = hand_value(game["player"])
+    #Ima start commeting more lemme make sure the dealer keeps hitting until he reaches 17
+    while hand_value(game["dealer"]) <17 and player_val <= 21:
+        game["dealer"].append(game["deck"].pop())
+    dealer_val = hand_value(game["dealer"])
+    bet=game["bet"]
+    uid=game["uid"]
+
+    if player_val>21:
+        label="Bust"
+        profit=-bet
+    elif natural and dealer_val !=21:
+        label="Blackjack!"
+        profit=scaled_win(uid,bet,5)
+    elif dealer_val >21 or player_val > dealer_val:
+        if dealer_val > 21:
+            label="Dealer got over 21.You win"
+        else:
+            label="You win"
+        if player_val==21:
+            label="21! " + label
+            profit=scaled_win(uid,bet,3)
+        else:
+            profit=scaled_win(uid,bet,2)
+    elif player_val == dealer_val:
+        label="Push"
+        profit=0
+    else:
+        label="Dealer wins."
+        profit=-bet
+    if bet+ profit >0:
+        db_module.change_money(uid,cash=bet + profit)
+
+    bj_games.pop(game["gid"], None)
+    game["result"] = (label, profit)
+
+def bj_timeout(gid):
+    with db_module.lock:
+        game=bj_games.get(gid)
+        if game:
+            finish_bj_game(game)
+def start_bj_game(uid,bet_text):
+    cash,_=db_module.get_user(uid)
+    bet,err=universalhelper(bet_text,cash)
+    if err:
+        return add_usage_hint(err, "\nUsage: `/blackjack <bet|half|all>`")
+    db_module.change_money(uid,cash=bet)
+    deck=new_deck()
+    game_id=uuid.uuid4().hex[:8]
+
+    game={
+        "gid":game_id,
+        "uid":uid,
+        "bet":bet,
+        "bet0":bet,
+        "deck":deck,
+        "player": [deck.pop(), deck.pop()],
+        "dealer": [deck.pop(), deck.pop()],
+    }
+    bj_games[game_id]=game
