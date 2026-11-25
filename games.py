@@ -147,9 +147,9 @@ def build_hl_screen(game):
     if higher_chance >0:
         high_mult=get_hl_multiplier(higher_chance)
         buttons.append(ui.button(f"⬆️ Higher  x{high_mult:.2f}", "hl_higher", game["gid"], "primary"))
-        if lower_chance >0:
-            low_mult=get_hl_multiplier(lower_chance)
-            buttons.append(ui.button(f"⬇️ Lower  x{low_mult:.2f}", "hl_lower", game["gid"]))
+    if lower_chance >0:
+        low_mult=get_hl_multiplier(lower_chance)
+        buttons.append(ui.button(f"⬇️ Lower  x{low_mult:.2f}", "hl_lower", game["gid"]))
     buttons.append(ui.HELP_BUTTON)
 
     return ui.embed(
@@ -163,10 +163,10 @@ def build_hl_screen(game):
     )
 
 def start_hl_game(uid,bet_text):
-    cash,_=db_module?get_user(uid)
+    cash,_=db_module.get_user(uid)
     bet,err=universalhelper(bet_text,cash)
     if err:
-       return add_usage_hint(err, "\nUsage: `/higher-lower <bet|half|all>`")
+        return add_usage_hint(err, "\nUsage: `/higher-lower <bet|half|all>`")
 
     db_module.change_money(uid,cash=-bet)
     game_id = uuid.uuid4().hex[:8]
@@ -207,3 +207,38 @@ def register_hl_action(slack_app):
             hl_games.pop(game_id)
             first_card=game["card"]
             next_card = (random.randint(1, 13), random.choice(SUITS))
+            first_number = first_card[0]
+            next_number=next_card[0]
+            if action["action_id"] == "hl_higher":
+                chance=(13-first_number)/13
+                player_won=next_number >first_number
+            else:
+                chance=(first_number-1) /13
+                player_won=next_number < first_number
+
+            if player_won:
+                mult=get_hl_multiplier(chance)
+                profit=scaled_win(uid,bet,mult-1)
+                db_module.change_money(uid,cash=bet+profit)
+                result_text="You win💢"
+                card_color=ui.GREEN
+            else:
+                profit= -bet
+                result_text="You lose HAHAA"
+                card_color=ui.RED
+
+            play_again_btn = ui.button("▶️ Play Again", "hl_again", f"{uid}:{bet}", "primary")
+
+            ui.swap(
+                respond,
+                ui.embed(
+                    f"🔼 *Higher or Lower* · {ui.tag(uid)} · bet {ui.fmt(bet)}\n\n"
+                    f"{card_str(first_card)} → {card_str(next_card)}\n"
+                    f"*Result:* {result_text}  *{ui.signed(profit)}*",
+                    card_color,
+                    nolog=True,
+                    buttons=[play_again_btn, ui.HELP_BUTTON],
+                ),
+                db_module.db,
+                db_module.lock,
+            )
