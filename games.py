@@ -4,6 +4,8 @@ import random
 import database as db_module
 import ui
 from commands import cmd, parse_amount
+import re
+import uuid
 
 def universalhelper(bet_text,maximum):
     if not bet_text:
@@ -95,3 +97,113 @@ def register_rps_action(slack_app):
             ), db_module.db, db_module.lock)
 
 #Time to do roulette
+@cmd("lesgamble")
+def lesgamble(uid,args):
+    if len(args) <2:
+        return "How to use: /lesgamble <red|black|green|0-36> <bet>"
+    choice=args[0].lower()
+    integer=random.randint(0,36)
+    valid_colors=("red","black","green")
+    if choice not in valid_colors and not (choice.isdigit() and 0 <= int(choice) <= 36):
+        return "Pick red,black, gren or a number from 0 to 36.read!"
+    red={1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36} #the others are black
+    green=0
+    if integer in red:
+        rolledcolor="red"
+    elif integer == green:
+        rolledcolor="green"
+    else:
+        rolledcolor="black"
+    cash, _ = db_module.get_user(uid)
+    bet,err=universalhelper(args[1],cash)
+    if err:
+        return add_usage_hint(err, "\nHow to use: /lesgamble <red|black|green|0-36> <bet>")
+    if choice.isdigit():
+        profit=bet *35 if int(choice)==integer else -bet
+    elif choice =="green":
+        profit=bet*14 if rolledcolor=="green" else -bet
+    else:
+        profit=bet if choice ==rolledcolor else -bet
+    db_module.change_money(uid,cash=profit)
+    return f"Ball landed on *{integer} ({rolledcolor})* | {ui.signed(profit)}"
+
+#Les do higher/lower should be pretty free
+hl_games={}
+def get_hl_multiplier(chance):
+    if chance <= 0:
+        return None
+    payout=0.97/chance
+    if payout > 12.0:
+        return 12.0
+    return payout
+def build_hl_screen(game):
+    first_card = game["card"]
+    card_number=first_card[0]
+
+    higher_chance=(13-card_number)/13
+    lower_chance=(card_number-1)/13
+    buttons =[]
+
+    if higher_chance >0:
+        high_mult=get_hl_multiplier(higher_chance)
+        buttons.append(ui.button(f"⬆️ Higher  x{high_mult:.2f}", "hl_higher", game["gid"], "primary"))
+        if lower_chance >0:
+            low_mult=get_hl_multiplier(lower_chance)
+            buttons.append(ui.button(f"⬇️ Lower  x{low_mult:.2f}", "hl_lower", game["gid"]))
+    buttons.append(ui.HELP_BUTTON)
+
+    return ui.embed(
+        f"🔼 *Higher or Lower* · {ui.tag(game['uid'])} · bet {ui.fmt(game['bet'])}\n\n"
+        f"Current card: {card_str(first_card)}\n"
+        f"Will the next card be higher or lower? (A is low, K is high, ties lose)",
+        ui.BLUE,
+        nolog=True,
+        buttons=buttons,
+        footer="The payour is bigger when the guess is less likely."
+    )
+
+def start_hl_game(uid,bet_text):
+    cash,_=db_module?get_user(uid)
+    bet,err=universalhelper(bet_text,cash)
+    if err:
+       return add_usage_hint(err, "\nUsage: `/higher-lower <bet|half|all>`")
+
+    db_module.change_money(uid,cash=-bet)
+    game_id = uuid.uuid4().hex[:8]
+    starting_card = (random.randint(1, 13), random.choice(SUITS))
+    game= {
+        "gid":game_id,
+        "uid":uid,
+        "bet":bet,
+        "card":starting_card
+    }
+    hl_games[game_id]=game
+    schedule_refund(hl_games,game_id)
+    return build_hl_screen(game)
+
+@cmd("higher-lower")
+def higher_lower(uid,args):
+    bet_text = args[0] if args else ""
+    return start_hl_game(uid,bet_text)
+
+def register_hl_action(slack_app):
+    @slack_app.action(re.compile(r"^hl_(higher|lower)$"))
+    def hl_action(ack,body,respond,action):
+        ack()
+        with db_module.lock:
+            game_id = action["value"]
+            game=hl_games.get(game_id)
+
+            if not game:
+                ui.only_you(respond,"The game ended bro.")
+                return
+            uid=game["uid"]
+            bet=game["bet"]
+
+            if body["user"]["id"] != uid:
+                ui.only_you(respond,"This ain't your game!")
+                return
+
+            hl_games.pop(game_id)
+            first_card=game["card"]
+            next_card = (random.randint(1, 13), random.choice(SUITS))
