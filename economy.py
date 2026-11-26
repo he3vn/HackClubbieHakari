@@ -61,3 +61,30 @@ def give(uid, args):
     db_module.change_money(uid, cash=-amount)
     db_module.change_money(target, cash=amount)
     return f"{ui.tag(uid)} gave {ui.fmt(amount)} to {ui.tag(target)}."
+
+
+@cmd("stats")
+def stats(uid, args):
+    with db_module.lock:
+        rows = db_module.db.execute("SELECT cash, bank, cash_x, bank_x FROM users").fetchall()
+    #i add the numbers up in python, sqlite would overflow on the big ones
+    cash = sum(int(row[0] or 0) + int(row[2] or 0) * db_module.UNIT for row in rows)
+    bank = sum(int(row[1] or 0) + int(row[3] or 0) * db_module.UNIT for row in rows)
+    return (f"*Economy stats*\nPlayers: {len(rows):,}\nTotal cash: {ui.fmt(cash)}\n"
+            f"Total bank: {ui.fmt(bank)}\nTotal: {ui.fmt(cash + bank)}")
+
+
+def leaderboard_page(uid, page):
+    with db_module.lock:
+        admin_ids = list(ADMINS)
+        marks = ",".join("?" * len(admin_ids))
+        raw = db_module.db.execute(
+            f"SELECT uid, cash, bank, cash_x, bank_x FROM users WHERE uid NOT IN ({marks})",
+            admin_ids).fetchall()
+
+    totals = []
+    for player_id, cash, bank, cash_x, bank_x in raw:
+        total = int(cash or 0) + int(bank or 0) + (int(cash_x or 0) + int(bank_x or 0)) * db_module.UNIT
+        if total > 0:
+            totals.append((player_id, total))
+    totals.sort(key=lambda row: (-row[1], row[0]))
