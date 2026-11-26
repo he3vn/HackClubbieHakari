@@ -1,4 +1,6 @@
 #Yh this is the shop or should i say catalog kinda seems cringe anyways yh  u can buy stuff in here
+#So the catalog, buying stuff and your inventory. Everything lives in the items
+#and inv tables in the database.
 
 import database as db_module
 import ui
@@ -9,6 +11,7 @@ from commands import cmd, parse_amount
 #So when in slack someone types /buy cofee 2 it like runs a command so ima write some cmds?
 @cmd("catalog")
 def catalog(uid, args):
+    """See what is for sale, or look at one item"""
     with db_module.lock:
         if args:
             row = db_module.db.execute(
@@ -20,9 +23,11 @@ def catalog(uid, args):
         return "No items yet."
     return "*Catalog*\n" + "\n".join(f"`{n}` • {ui.fmt(p)}" for n, p in rows) + "\nDetails: `/catalog <item>`"
 
+
 #For the buying if you dont have any arguments it reject and tells you to add some arguments or easier said stuff to buy
 @cmd("buy")
 def buy(uid, args):
+    """Buy an item, you can buy more than one at a time"""
     if not args:
         return "How to use: `/buy <item> [amount]` and yes no arrows"
     amount = int(args[1]) if len(args) > 1 and args[1].isdigit() else 1
@@ -38,8 +43,10 @@ def buy(uid, args):
     db_module.change_inv(uid, args[0], amount)
     return f"Yh you bought {amount}x `{args[0]}` for {ui.fmt(total_cost)}."
 
+
 @cmd("inventory")
 def inventory(uid, args):
+    """Everything you own"""
     with db_module.lock:
         rows = db_module.db.execute(
             "SELECT name,amount FROM inv WHERE uid=? AND amount>0", (uid,)
@@ -48,8 +55,10 @@ def inventory(uid, args):
         return "You didnt buy anything gng."
     return "*Inventory*\n" + "\n".join(f"`{n}` x{a}" for n, a in rows)
 
+
 @cmd("use")
 def use(uid, args):
+    """Use one of your items"""
     if not args:
         return "How to use: `/use <item> [amount]`"
     amount = int(args[1]) if len(args) > 1 and args[1].isdigit() else 1
