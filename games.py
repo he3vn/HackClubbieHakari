@@ -1,5 +1,6 @@
 #This is going to be like the solo gambling games and the 2 players ones too yh
 #So commands is supposed to parse the amount it takes in text and checks the number and return maximum or maximum/2 yh ima use this
+
 import random
 import re
 import threading
@@ -18,7 +19,6 @@ SUITS = "♠♥♦♣"
 RED_NUMBERS = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
 
 
-# ---------- small helpers ----------
 def card_str(card):
     face = {1: "A", 11: "J", 12: "Q", 13: "K"}.get(card[0], str(card[0]))
     return f"`{face}{card[1]}`"
@@ -857,3 +857,223 @@ def register_challenge_actions(slack_app):
 
 
 #the 2 player rock paper scissors
+def rps_view(game):
+    picks = game["picks"]
+    status = " | ".join(f"{ui.tag(player)} {'picked' if player in picks else 'thinking'}"
+                        for player in (game["a"], game["b"]))
+    text = f"*Rock Paper Scissors* | {ui.tag(game['a'])} vs {ui.tag(game['b'])} ({stake_text(game['bet'])})\n{status}"
+    buttons = [ui.button(f"{emoji} {move.title()}", f"prps_{move}", game["gid"]) for move, emoji in RPS_CHOICES.items()]
+    return {"text": text, "blocks": [ui.section(text), {"type": "actions", "elements": buttons}]}
+
+
+def register_pvp_rps_action(slack_app):
+    @slack_app.action(re.compile(r"^prps_(rock|paper|scissors)$"))
+    def prps_action(ack, body, respond, action, client):
+        ack()
+        set_context(client, body)
+        with db_module.lock:
+            game = pvp_games.get(action["value"])
+            user = body["user"]["id"]
+            if not game:
+                ui.only_you(respond, "That game has ended.", client, body)
+                return
+            if user not in (game["a"], game["b"]):
+                ui.only_you(respond, "This isn't your game!", client, body)
+                return
+            if user in game["picks"]:
+                ui.only_you(respond, "You already picked, waiting for your opponent.", client, body)
+                return
+            move = action["action_id"][5:]
+            game["picks"][user] = move
+            game["url"] = body.get("response_url") or game["url"]
+            if len(game["picks"]) < 2:
+                arm_pvp_timer(game)
+                respond(replace_original=True, **ui.wire(ui.render(rps_view(game), False)))
+                ui.only_you(respond, f"You picked {RPS_CHOICES[move]} {move}. Waiting for your opponent...", client, body)
+                return
+            player_a, player_b, bet = game["a"], game["b"], game["bet"]
+            pick_a, pick_b = game["picks"][player_a], game["picks"][player_b]
+            if game.get("timer"):
+                game["timer"].cancel()
+            pvp_games.pop(game["gid"], None)
+            head = f"*Rock Paper Scissors* | {ui.tag(player_a)} {RPS_CHOICES[pick_a]} {pick_a}  vs  {ui.tag(player_b)} {RPS_CHOICES[pick_b]} {pick_b}\n"
+            if pick_a == pick_b:
+                db_module.change_money(player_a, cash=bet)
+                db_module.change_money(player_b, cash=bet)
+                result = "Tie, bets returned."
+            else:
+                winner, loser = (player_a, player_b) if RPS_BEATS[pick_a] == pick_b else (player_b, player_a)
+                result = win_text(winner, loser, bet, pay_pvp_winner(winner, bet))
+            log_move(player_a, f"played rps vs {ui.tag(player_b)}", result)
+            replace_message(respond, head + result, client=client, body=body)
+
+
+#the 2 player blackjack
+def bj2_state(game, player):
+    value = hand_value(game["h"][player])
+    if value > 21:
+        return "💥 bust"
+    if player in game["done"]:
+        return "✋ stood"
+    return "🤔 playing"
+
+
+def bj2_view(game):
+    text = (f"🃏 *Blackjack* | {ui.tag(game['a'])} vs {ui.tag(game['b'])} ({stake_text(game['bet'])})\n"
+            + "\n".join(f"{ui.tag(player)}: {bj2_state(game, player)} · {len(game['h'][player])} cards"
+                        for player in (game["a"], game["b"])))
+    buttons = [ui.button("Hit", "pbj_hit", game["gid"], "primary"), ui.button("Stand", "pbj_stand", game["gid"]),
+               ui.button("My hand", "pbj_hand", game["gid"])]
+    return {"text": text, "blocks": [ui.section(text), {"type": "actions", "elements": buttons}]}
+
+
+def bj2_result(game):
+    player_a, player_b, bet = game["a"], game["b"], game["bet"]
+    value_a, value_b = hand_value(game["h"][player_a]), hand_value(game["h"][player_b])
+    score_a = 0 if value_a > 21 else value_a
+    score_b = 0 if value_b > 21 else value_b
+    head = (f"🃏 *Blackjack* | {ui.tag(player_a)} {hand_str(game['h'][player_a])} = *{value_a}*  vs  "
+            f"{ui.tag(player_b)} {hand_str(game['h'][player_b])} = *{value_b}*\n")
+    if score_a == score_b:
+        db_module.change_money(player_a, cash=bet)
+        db_module.change_money(player_b, cash=bet)
+        result = "Tie, bets returned."
+    else:
+        winner, loser = (player_a, player_b) if score_a > score_b else (player_b, player_a)
+        result = win_text(winner, loser, bet, pay_pvp_winner(winner, bet))
+    log_move(player_a, f"played blackjack vs {ui.tag(player_b)}", result)
+    return head + result
+
+
+def register_pvp_bj_action(slack_app):
+    @slack_app.action(re.compile(r"^pbj_(hit|stand|hand)$"))
+    def pbj_action(ack, body, respond, action, client):
+        ack()
+        set_context(client, body)
+        with db_module.lock:
+            game = pvp_games.get(action["value"])
+            user = body["user"]["id"]
+            if not game:
+                ui.only_you(respond, "That game has ended.", client, body)
+                return
+            if user not in (game["a"], game["b"]):
+                ui.only_you(respond, "This isn't your game!", client, body)
+                return
+            hand = game["h"][user]
+            kind = action["action_id"][4:]
+
+            def my_hand():
+                return f"Your hand: {hand_str(hand)} = *{hand_value(hand)}*"
+
+            if kind == "hand":
+                ui.only_you(respond, my_hand(), client, body)
+                return
+            if user in game["done"]:
+                ui.only_you(respond, f"You're done, waiting for your opponent.\n{my_hand()}", client, body)
+                return
+            game["url"] = body.get("response_url") or game["url"]
+            if kind == "hit":
+                hand.append(game["deck"].pop())
+                if hand_value(hand) >= 21:
+                    game["done"].add(user)
+            else:
+                game["done"].add(user)
+            busted = any(hand_value(game["h"][player]) > 21 for player in (game["a"], game["b"]))
+            if busted or len(game["done"]) == 2:
+                if game.get("timer"):
+                    game["timer"].cancel()
+                pvp_games.pop(game["gid"], None)
+                replace_message(respond, bj2_result(game), client=client, body=body)
+                return
+            arm_pvp_timer(game)
+            respond(replace_original=True, **ui.wire(ui.render(bj2_view(game), False)))
+            ui.only_you(respond, my_hand(), client, body)
+
+
+#tic tac toe
+LINES = [(0, 1, 2), (3, 4, 5), (6, 7, 8), (0, 3, 6), (1, 4, 7), (2, 5, 8), (0, 4, 8), (2, 4, 6)]
+CELL = {None: "⬜", "X": "❌", "O": "⭕"}
+NUMS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
+
+
+def ttt_head(game):
+    return f"*Tic Tac Toe* | ❌ {ui.tag(game['a'])} vs ⭕ {ui.tag(game['b'])} ({stake_text(game['bet'])})"
+
+
+def board_text(board, numbers=False):
+    def one_cell(index):
+        if numbers and not board[index]:
+            return NUMS[index]
+        return CELL[board[index]]
+    return "\n".join("".join(one_cell(row * 3 + column) for column in range(3)) for row in range(3))
+
+
+def ttt_view(game):
+    mark = "❌" if game["turn"] == game["a"] else "⭕"
+    text = f"{ttt_head(game)}\nTurn: {mark} {ui.tag(game['turn'])}\n\n{board_text(game['board'], True)}"
+    options = [{"text": {"type": "plain_text", "text": f"Square {index + 1}"}, "value": f"{game['gid']}:{index}"}
+               for index in range(9) if not game["board"][index]]
+    blocks = [ui.section(text), {"type": "actions", "elements": [
+        {"type": "static_select", "action_id": "ttt_pick",
+         "placeholder": {"type": "plain_text", "text": "Pick a square (1-9)"}, "options": options}]}]
+    return {"text": text, "blocks": blocks}
+
+
+@cmd("ttt")
+def ttt(uid, args):
+    if not args or not args[0].startswith("<"):
+        return "❌ Usage: `/ttt @user [bet]`"
+    return _make_challenge(uid, args, "ttt")
+
+
+def register_ttt_action(slack_app):
+    @slack_app.action("ttt_pick")
+    def ttt_action(ack, body, respond, action, client):
+        ack()
+        set_context(client, body)
+        with db_module.lock:
+            pick = action.get("selected_option") or {}
+            picked = pick.get("value") or action.get("value")
+            if not picked:
+                ui.only_you(respond, "Pick a square.", client, body)
+                return
+            gid, index = picked.split(":")
+            game = pvp_games.get(gid)
+            user = body["user"]["id"]
+            if not game:
+                ui.only_you(respond, "That game has ended.", client, body)
+                return
+            if user not in (game["a"], game["b"]):
+                ui.only_you(respond, "This isn't your game!", client, body)
+                return
+            if user != game["turn"]:
+                ui.only_you(respond, "It's not your turn!", client, body)
+                return
+            square = int(index)
+            if game["board"][square]:
+                ui.only_you(respond, "That square is taken.", client, body)
+                return
+            mark = "X" if user == game["a"] else "O"
+            game["board"][square] = mark
+            game["url"] = body.get("response_url") or game["url"]
+            won = any(all(game["board"][spot] == mark for spot in line) for line in LINES)
+            full = all(game["board"])
+            if won or full:
+                if game.get("timer"):
+                    game["timer"].cancel()
+                pvp_games.pop(game["gid"], None)
+                bet = game["bet"]
+                if won:
+                    other = game["b"] if user == game["a"] else game["a"]
+                    result = win_text(user, other, bet, pay_pvp_winner(user, bet))
+                else:
+                    db_module.change_money(game["a"], cash=bet)
+                    db_module.change_money(game["b"], cash=bet)
+                    result = "Draw, bets returned."
+                log_move(game["a"], f"played tic tac toe vs {ui.tag(game['b'])}", result)
+                replace_message(respond, f"{ttt_head(game)}\n{board_text(game['board'])}\n{result}",
+                                client=client, body=body)
+                return
+            game["turn"] = game["b"] if user == game["a"] else game["a"]
+            arm_pvp_timer(game)
+            respond(replace_original=True, **ui.wire(ui.render(ttt_view(game), False)))
